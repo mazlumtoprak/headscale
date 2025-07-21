@@ -173,18 +173,19 @@ type PKCEConfig struct {
 }
 
 type OIDCConfig struct {
-	OnlyStartIfOIDCIsAvailable bool
-	Issuer                     string
-	ClientID                   string
-	ClientSecret               string
-	Scope                      []string
-	ExtraParams                map[string]string
-	AllowedDomains             []string
-	AllowedUsers               []string
-	AllowedGroups              []string
-	Expiry                     time.Duration
-	UseExpiryFromToken         bool
-	PKCE                       PKCEConfig
+	OnlyStartIfOIDCIsAvailable     bool
+	Issuer                         string
+	ClientID                       string
+	ClientSecret                   string
+	Scope                          []string
+	ExtraParams                    map[string]string
+	AllowedDomains                 []string
+	AllowedUsers                   []string
+	AllowedGroups                  []string
+	Expiry                         time.Duration
+	UseExpiryFromToken             bool
+	SessionInvalidationGracePeriod time.Duration
+	PKCE                           PKCEConfig
 }
 
 type DERPConfig struct {
@@ -319,6 +320,7 @@ func LoadConfig(path string, isFile bool) error {
 	viper.SetDefault("oidc.only_start_if_oidc_is_available", true)
 	viper.SetDefault("oidc.expiry", "180d")
 	viper.SetDefault("oidc.use_expiry_from_token", false)
+	viper.SetDefault("oidc.session_invalidation_grace_period", "30m")
 	viper.SetDefault("oidc.pkce.enabled", false)
 	viper.SetDefault("oidc.pkce.method", "S256")
 
@@ -955,7 +957,8 @@ func LoadServerConfig() (*Config, error) {
 					return time.Duration(expiry)
 				}
 			}(),
-			UseExpiryFromToken: viper.GetBool("oidc.use_expiry_from_token"),
+			UseExpiryFromToken:             viper.GetBool("oidc.use_expiry_from_token"),
+			SessionInvalidationGracePeriod: viper.GetDuration("oidc.session_invalidation_grace_period"),
 			PKCE: PKCEConfig{
 				Enabled: viper.GetBool("oidc.pkce.enabled"),
 				Method:  viper.GetString("oidc.pkce.method"),

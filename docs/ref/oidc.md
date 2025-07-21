@@ -29,6 +29,7 @@ oidc:
 
   # Customize the scopes used in the OIDC flow, defaults to "openid", "profile" and "email" and add custom query
   # parameters to the Authorize Endpoint request. Scopes default to "openid", "profile" and "email".
+  # To enable automatic token refresh, add "offline_access" to the scope list.
   scope: ["openid", "profile", "email", "custom"]
   # Optional: Passed on to the browser login request – used to tweak behaviour for the OIDC provider
   extra_params:
