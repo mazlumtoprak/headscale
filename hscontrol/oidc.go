@@ -320,7 +320,7 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 	// Register the node if it does not exist.
 	if registrationId != nil {
 		verb := "Reauthenticated"
-		newNode, err := a.handleRegistration(user, *registrationId, nodeExpiry)
+		nodeID, newNode, err := a.handleRegistration(user, *registrationId, nodeExpiry)
 		if err != nil {
 			httpError(writer, err)
 			return
@@ -331,7 +331,7 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 		}
 
 		// Create or update OIDC session for this node
-		if err := a.createOrUpdateOIDCSession(user, *registrationId, oauth2Token, nodeExpiry); err != nil {
+		if err := a.createOrUpdateOIDCSession(*registrationId, oauth2Token, *nodeID); err != nil {
 			log.Error().Err(err).Msg("Failed to create OIDC session")
 			// Don't fail the auth flow, just log the error
 		}
@@ -355,7 +355,6 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 	// Neither node nor machine key was found in the state cache meaning
 	// that we could not reauth nor register the node.
 	httpError(writer, NewHTTPError(http.StatusGone, "login session expired, try again", nil))
-	return
 }
 
 func extractCodeAndStateParamFromRequest(
@@ -397,21 +396,14 @@ func (a *AuthProviderOIDC) getOauth2Token(
 }
 
 // createOrUpdateOIDCSession creates or updates an OIDC session for a node
-func (a *AuthProviderOIDC) createOrUpdateOIDCSession(user *types.User, registrationID types.RegistrationID, token *oauth2.Token, nodeExpiry time.Time) error {
+func (a *AuthProviderOIDC) createOrUpdateOIDCSession(registrationID types.RegistrationID, token *oauth2.Token, nodeID types.NodeID) error {
 
 	if token.RefreshToken == "" {
 		log.Warn().
-			Str("user", user.Username()).
+			Str("node_id", nodeID.String()).
 			Str("registration_id", registrationID.String()).
 			Msg("OIDC: No refresh token in OAuth2 token, skipping session creation (check offline_access scope)")
 		return nil
-	}
-
-	// Find the node in the database - we'll get the most recent OIDC node for this user
-	var node types.Node
-	err := a.db.DB.Where("user_id = ? AND register_method = ?", user.ID, util.RegisterMethodOIDC).Order("created_at DESC").First(&node).Error
-	if err != nil {
-		return fmt.Errorf("failed to find node: %w", err)
 	}
 
 	// Generate session ID
@@ -423,8 +415,7 @@ func (a *AuthProviderOIDC) createOrUpdateOIDCSession(user *types.User, registrat
 	// Create or update session
 	tokenExpiryUTC := token.Expiry.UTC()
 	session := &types.OIDCSession{
-		UserID:         user.ID,
-		NodeID:         node.ID,
+		NodeID:         nodeID,
 		SessionID:      sessionID,
 		RegistrationID: registrationID,
 		RefreshToken:   token.RefreshToken,
@@ -438,7 +429,7 @@ func (a *AuthProviderOIDC) createOrUpdateOIDCSession(user *types.User, registrat
 
 	// Try to update existing session first
 	var existingSession types.OIDCSession
-	err = a.db.DB.Where("user_id = ? AND node_id = ?", user.ID, node.ID).First(&existingSession).Error
+	err = a.db.DB.Where("node_id = ?", nodeID).First(&existingSession).Error
 	if err == nil {
 		// Update existing session
 		existingSession.RefreshToken = token.RefreshToken
@@ -536,12 +527,13 @@ func (a *AuthProviderOIDC) RefreshOIDCSession(ctx context.Context, session *type
 func (a *AuthProviderOIDC) RefreshExpiredTokens(ctx context.Context) error {
 	var sessions []types.OIDCSession
 
-	// Find active sessions with tokens expiring in the next 30 minutes
+	// Find active sessions with tokens expiring in the configured threshold time
 	currentTime := time.Now().UTC()
-	threshold := currentTime.Add(30 * time.Minute)
+	threshold := currentTime.Add(a.cfg.TokenRefresh.ExpiryThreshold)
 
 	// Only refresh tokens for sessions linked to OIDC-registered nodes
-	err := a.db.DB.Joins("JOIN nodes ON nodes.id = oidc_sessions.node_id").
+	err := a.db.DB.Preload("Node").Preload("Node.User").
+		Joins("JOIN nodes ON nodes.id = oidc_sessions.node_id").
 		Where("oidc_sessions.is_active = ? AND oidc_sessions.token_expiry IS NOT NULL AND oidc_sessions.token_expiry < ? AND oidc_sessions.refresh_token != '' AND nodes.register_method = ?",
 			true, threshold, "oidc").
 		Find(&sessions).Error
@@ -559,7 +551,7 @@ func (a *AuthProviderOIDC) RefreshExpiredTokens(ctx context.Context) error {
 		if err := a.RefreshOIDCSession(ctx, &session); err != nil {
 			log.Error().Err(err).
 				Str("session_id", session.SessionID).
-				Uint("user_id", session.UserID).
+				Uint("user_id", session.Node.UserID).
 				Uint64("node_id", uint64(session.NodeID)).
 				Msg("OIDC: Failed to refresh session, deactivating")
 			// Deactivate the session if refresh fails
@@ -685,10 +677,10 @@ func (a *AuthProviderOIDC) handleRegistration(
 	user *types.User,
 	registrationID types.RegistrationID,
 	expiry time.Time,
-) (bool, error) {
+) (*types.NodeID, bool, error) {
 	ipv4, ipv6, err := a.ipAlloc.Next()
 	if err != nil {
-		return false, err
+		return nil, false, err
 	}
 
 	node, newNode, err := a.db.HandleNodeFromAuthPath(
@@ -699,7 +691,7 @@ func (a *AuthProviderOIDC) handleRegistration(
 		ipv4, ipv6,
 	)
 	if err != nil {
-		return false, fmt.Errorf("could not register node: %w", err)
+		return nil, false, fmt.Errorf("could not register node: %w", err)
 	}
 
 	// Send an update to all nodes if this is a new node that they need to know
@@ -707,7 +699,7 @@ func (a *AuthProviderOIDC) handleRegistration(
 	// If this is a refresh, just send new expiry updates.
 	updateSent, err := nodesChangedHook(a.db, a.polMan, a.notifier)
 	if err != nil {
-		return false, fmt.Errorf("updating resources using node: %w", err)
+		return nil, false, fmt.Errorf("updating resources using node: %w", err)
 	}
 
 	// This is a bit of a back and forth, but we have a bit of a chicken and egg
@@ -723,7 +715,7 @@ func (a *AuthProviderOIDC) handleRegistration(
 	// eventbus.
 	routesChanged := policy.AutoApproveRoutes(a.polMan, node)
 	if err := a.db.DB.Save(node).Error; err != nil {
-		return false, fmt.Errorf("saving auto approved routes to node: %w", err)
+		return nil, false, fmt.Errorf("saving auto approved routes to node: %w", err)
 	}
 
 	if !updateSent || routesChanged {
@@ -738,7 +730,7 @@ func (a *AuthProviderOIDC) handleRegistration(
 		a.notifier.NotifyWithIgnore(ctx, types.UpdatePeerChanged(node.ID), node.ID)
 	}
 
-	return newNode, nil
+	return &node.ID, newNode, nil
 }
 
 // TODO(kradalby):
