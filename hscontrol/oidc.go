@@ -236,7 +236,6 @@ func (a *AuthProviderOIDC) OIDCCallbackHandler(
 	}
 
 	oauth2Token, err := a.getOauth2Token(req.Context(), code, state)
-
 	if err != nil {
 		httpError(writer, err)
 		return
@@ -397,7 +396,6 @@ func (a *AuthProviderOIDC) getOauth2Token(
 
 // createOrUpdateOIDCSession creates or updates an OIDC session for a node
 func (a *AuthProviderOIDC) createOrUpdateOIDCSession(registrationID types.RegistrationID, token *oauth2.Token, nodeID types.NodeID) error {
-
 	if token.RefreshToken == "" {
 		log.Warn().
 			Str("node_id", nodeID.String()).
@@ -459,7 +457,6 @@ func (a *AuthProviderOIDC) createOrUpdateOIDCSession(registrationID types.Regist
 // RefreshOIDCSession refreshes an expired OIDC session using the stored refresh token
 // and updates the node expiry using the existing HandleNodeFromAuthPath flow
 func (a *AuthProviderOIDC) RefreshOIDCSession(ctx context.Context, session *types.OIDCSession) error {
-
 	if session.RefreshToken == "" {
 		return fmt.Errorf("no refresh token available for session %s", session.SessionID)
 	}
